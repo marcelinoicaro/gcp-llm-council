@@ -1,8 +1,8 @@
 #!/bin/bash
 
-# LLM Council - Start script
+# GCP LLM Council - Start script
 
-echo "Starting LLM Council..."
+echo "Starting GCP LLM Council..."
 echo ""
 
 # Start backend
@@ -20,7 +20,7 @@ npm run dev &
 FRONTEND_PID=$!
 
 echo ""
-echo "✓ LLM Council is running!"
+echo "✓ GCP LLM Council is running!"
 echo "  Backend:  http://localhost:8001"
 echo "  Frontend: http://localhost:5173"
 echo ""

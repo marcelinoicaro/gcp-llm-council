@@ -1,0 +1,14 @@
+# Copy to terraform.tfvars (gitignored) and fill in.
+project_id = "my-gcp-project"
+
+# Who may impersonate the app's service account (recommended: yourself)
+impersonators = ["user:you@example.com"]
+
+# Optional: extra people who can call Vertex AI with their own credentials
+# vertex_users = ["user:someone@example.com"]
+
+# Optional: monthly budget alert
+# enable_budget         = true
+# billing_account       = "XXXXXX-XXXXXX-XXXXXX"
+# monthly_budget_amount = 20
+# budget_currency       = "USD"

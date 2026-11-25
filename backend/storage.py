@@ -2,6 +2,7 @@
 
 import json
 import os
+import uuid
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from pathlib import Path
@@ -9,13 +10,25 @@ from .config import DATA_DIR
 
 
 def ensure_data_dir():
-    """Ensure the data directory exists."""
-    Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
+    """Ensure the data directory exists and is private to the current user."""
+    Path(DATA_DIR).mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(DATA_DIR, 0o700)
 
 
 def get_conversation_path(conversation_id: str) -> str:
-    """Get the file path for a conversation."""
-    return os.path.join(DATA_DIR, f"{conversation_id}.json")
+    """Get the file path for a conversation (only canonical UUIDs are accepted)."""
+    try:
+        canonical = str(uuid.UUID(str(conversation_id)))
+    except ValueError:
+        raise ValueError("Invalid conversation id")
+    return os.path.join(DATA_DIR, f"{canonical}.json")
+
+
+def _write_json(path: str, data: Dict[str, Any]):
+    """Write JSON to a file readable only by the current user."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w') as f:
+        json.dump(data, f, indent=2)
 
 
 def create_conversation(conversation_id: str) -> Dict[str, Any]:
@@ -39,8 +52,7 @@ def create_conversation(conversation_id: str) -> Dict[str, Any]:
 
     # Save to file
     path = get_conversation_path(conversation_id)
-    with open(path, 'w') as f:
-        json.dump(conversation, f, indent=2)
+    _write_json(path, conversation)
 
     return conversation
 
@@ -74,8 +86,7 @@ def save_conversation(conversation: Dict[str, Any]):
     ensure_data_dir()
 
     path = get_conversation_path(conversation['id'])
-    with open(path, 'w') as f:
-        json.dump(conversation, f, indent=2)
+    _write_json(path, conversation)
 
 
 def list_conversations() -> List[Dict[str, Any]]:
@@ -131,7 +142,8 @@ def add_assistant_message(
     conversation_id: str,
     stage1: List[Dict[str, Any]],
     stage2: List[Dict[str, Any]],
-    stage3: Dict[str, Any]
+    stage3: Dict[str, Any],
+    metadata: Optional[Dict[str, Any]] = None,
 ):
     """
     Add an assistant message with all 3 stages to a conversation.
@@ -150,7 +162,8 @@ def add_assistant_message(
         "role": "assistant",
         "stage1": stage1,
         "stage2": stage2,
-        "stage3": stage3
+        "stage3": stage3,
+        "metadata": metadata or {},
     })
 
     save_conversation(conversation)
@@ -170,3 +183,23 @@ def update_conversation_title(conversation_id: str, title: str):
 
     conversation["title"] = title
     save_conversation(conversation)
+
+
+def delete_conversation(conversation_id: str) -> bool:
+    """Delete a conversation file. Returns False if it did not exist."""
+    path = get_conversation_path(conversation_id)
+    if not os.path.exists(path):
+        return False
+    os.remove(path)
+    return True
+
+
+def iter_conversations() -> List[Dict[str, Any]]:
+    """Load every stored conversation (used for statistics)."""
+    ensure_data_dir()
+    conversations = []
+    for filename in os.listdir(DATA_DIR):
+        if filename.endswith('.json'):
+            with open(os.path.join(DATA_DIR, filename), 'r') as f:
+                conversations.append(json.load(f))
+    return conversations

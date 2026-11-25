@@ -1,199 +1,254 @@
-import { useState, useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import Sidebar from './components/Sidebar';
-import ChatInterface from './components/ChatInterface';
+import ChatView from './components/ChatView';
+import SettingsView from './components/SettingsView';
+import DashboardView from './components/DashboardView';
 import { api } from './api';
 import './App.css';
 
-function App() {
-  const [conversations, setConversations] = useState([]);
-  const [currentConversationId, setCurrentConversationId] = useState(null);
-  const [currentConversation, setCurrentConversation] = useState(null);
-  const [isLoading, setIsLoading] = useState(false);
+const memberKey = (stage, model) => `${stage}:${model}`;
 
-  // Load conversations on mount
-  useEffect(() => {
-    loadConversations();
+function App() {
+  const [view, setView] = useState('chat');
+  const [conversations, setConversations] = useState([]);
+  const [currentId, setCurrentId] = useState(null);
+  const [conversation, setConversation] = useState(null);
+  const [config, setConfig] = useState(null);
+  const [isRunning, setIsRunning] = useState(false);
+  const [error, setError] = useState(null);
+
+  const loadConversations = useCallback(async () => {
+    try {
+      setConversations(await api.listConversations());
+    } catch {
+      setError('Não foi possível carregar as conversas. O backend está rodando?');
+    }
   }, []);
 
-  // Load conversation details when selected
+  const loadConfig = useCallback(async () => {
+    try {
+      setConfig(await api.getConfig());
+    } catch {
+      /* the settings view shows its own error */
+    }
+  }, []);
+
   useEffect(() => {
-    if (currentConversationId) {
-      loadConversation(currentConversationId);
-    }
-  }, [currentConversationId]);
+    loadConversations();
+    loadConfig();
+  }, [loadConversations, loadConfig]);
 
-  const loadConversations = async () => {
+  useEffect(() => {
+    if (!currentId) {
+      setConversation(null);
+      return;
+    }
+    // A conversation created for a question being sent is filled locally.
+    if (conversation?.id === currentId) return;
+    api.getConversation(currentId)
+      .then(setConversation)
+      .catch(() => setError('Não foi possível abrir a conversa.'));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentId]);
+
+  const openConversation = (id) => {
+    setCurrentId(id);
+    setView('chat');
+  };
+
+  const createConversation = async () => {
+    const created = await api.createConversation();
+    setConversations((prev) => [
+      { id: created.id, created_at: created.created_at, title: created.title, message_count: 0 },
+      ...prev,
+    ]);
+    return created;
+  };
+
+  const newConversation = () => {
+    setCurrentId(null);
+    setView('chat');
+  };
+
+  const deleteConversation = async (id) => {
     try {
-      const convs = await api.listConversations();
-      setConversations(convs);
-    } catch (error) {
-      console.error('Failed to load conversations:', error);
+      await api.deleteConversation(id);
+      setConversations((prev) => prev.filter((c) => c.id !== id));
+      if (id === currentId) setCurrentId(null);
+    } catch {
+      setError('Não foi possível excluir a conversa.');
     }
   };
 
-  const loadConversation = async (id) => {
-    try {
-      const conv = await api.getConversation(id);
-      setCurrentConversation(conv);
-    } catch (error) {
-      console.error('Failed to load conversation:', error);
+  // Immutable update of the assistant message being streamed (always the last one).
+  const updateRun = (fn) => {
+    setConversation((prev) => {
+      if (!prev) return prev;
+      const messages = [...prev.messages];
+      const last = messages[messages.length - 1];
+      messages[messages.length - 1] = fn({ ...last, live: { ...last.live, members: { ...last.live.members } } });
+      return { ...prev, messages };
+    });
+  };
+
+  const handleEvent = (type, event) => {
+    switch (type) {
+      case 'run_start':
+        updateRun((m) => ({ ...m, live: { ...m.live, council: event.council, chairman: event.chairman } }));
+        break;
+      case 'stage1_start':
+      case 'stage2_start':
+      case 'stage3_start': {
+        const stage = type.slice(0, 6);
+        updateRun((m) => ({
+          ...m,
+          live: { ...m.live, stage, stageStarted: { ...m.live.stageStarted, [stage]: Date.now() } },
+        }));
+        break;
+      }
+      case 'member_start':
+        updateRun((m) => {
+          m.live.members[memberKey(event.stage, event.model)] = { status: 'running', startedAt: Date.now() };
+          return m;
+        });
+        break;
+      case 'member_done':
+        updateRun((m) => {
+          m.live.members[memberKey(event.stage, event.model)] = {
+            status: event.ok ? 'done' : 'failed',
+            latency_ms: event.latency_ms,
+            usage: event.usage,
+            cost_usd: event.cost_usd,
+          };
+          // Keep each member's output as soon as it arrives (partial results).
+          if (event.ok && (event.stage === 'stage1' || event.stage === 'stage2')) {
+            const item = event.stage === 'stage1'
+              ? {
+                model: event.model,
+                response: event.content,
+                latency_ms: event.latency_ms,
+                usage: event.usage,
+                cost_usd: event.cost_usd,
+              }
+              : {
+                model: event.model,
+                ranking: event.content,
+                parsed_ranking: event.parsed_ranking,
+                latency_ms: event.latency_ms,
+                usage: event.usage,
+                cost_usd: event.cost_usd,
+              };
+            const outputs = m.live.outputs || {};
+            m.live.outputs = { ...outputs, [event.stage]: { ...(outputs[event.stage] || {}), [event.model]: item } };
+          }
+          return m;
+        });
+        break;
+      case 'stage2_labels':
+        updateRun((m) => ({ ...m, live: { ...m.live, labels: event.label_to_model } }));
+        break;
+      case 'stage1_complete':
+        updateRun((m) => ({ ...m, stage1: event.data }));
+        break;
+      case 'stage2_complete':
+        updateRun((m) => ({ ...m, stage2: event.data, metadata: { ...m.metadata, ...event.metadata } }));
+        break;
+      case 'stage3_complete':
+        updateRun((m) => ({ ...m, stage3: event.data }));
+        break;
+      case 'title_complete':
+        setConversation((prev) => (prev ? { ...prev, title: event.data.title } : prev));
+        loadConversations();
+        break;
+      case 'complete':
+        updateRun((m) => ({ ...m, metadata: event.metadata, live: { ...m.live, stage: 'done' } }));
+        loadConversations();
+        setIsRunning(false);
+        break;
+      case 'error':
+        updateRun((m) => ({ ...m, live: { ...m.live, stage: 'error' } }));
+        setError(event.message || 'O conselho falhou.');
+        setIsRunning(false);
+        break;
+      default:
+        break;
     }
   };
 
-  const handleNewConversation = async () => {
+  const sendMessage = async (content) => {
+    setError(null);
+    let target = conversation;
     try {
-      const newConv = await api.createConversation();
-      setConversations([
-        { id: newConv.id, created_at: newConv.created_at, message_count: 0 },
-        ...conversations,
-      ]);
-      setCurrentConversationId(newConv.id);
-    } catch (error) {
-      console.error('Failed to create conversation:', error);
+      if (!target) {
+        const created = await createConversation();
+        target = { ...created, messages: [] };
+      }
+    } catch {
+      setError('Não foi possível criar a conversa.');
+      return;
     }
-  };
 
-  const handleSelectConversation = (id) => {
-    setCurrentConversationId(id);
-  };
-
-  const handleSendMessage = async (content) => {
-    if (!currentConversationId) return;
-
-    setIsLoading(true);
-    try {
-      // Optimistically add user message to UI
-      const userMessage = { role: 'user', content };
-      setCurrentConversation((prev) => ({
-        ...prev,
-        messages: [...prev.messages, userMessage],
-      }));
-
-      // Create a partial assistant message that will be updated progressively
-      const assistantMessage = {
-        role: 'assistant',
-        stage1: null,
-        stage2: null,
-        stage3: null,
-        metadata: null,
-        loading: {
-          stage1: false,
-          stage2: false,
-          stage3: false,
+    setIsRunning(true);
+    setCurrentId(target.id);
+    setConversation({
+      ...target,
+      messages: [
+        ...target.messages,
+        { role: 'user', content },
+        {
+          role: 'assistant',
+          stage1: null,
+          stage2: null,
+          stage3: null,
+          metadata: null,
+          live: { stage: 'starting', members: {}, stageStarted: {}, startedAt: Date.now() },
         },
-      };
+      ],
+    });
 
-      // Add the partial assistant message
-      setCurrentConversation((prev) => ({
-        ...prev,
-        messages: [...prev.messages, assistantMessage],
-      }));
-
-      // Send message with streaming
-      await api.sendMessageStream(currentConversationId, content, (eventType, event) => {
-        switch (eventType) {
-          case 'stage1_start':
-            setCurrentConversation((prev) => {
-              const messages = [...prev.messages];
-              const lastMsg = messages[messages.length - 1];
-              lastMsg.loading.stage1 = true;
-              return { ...prev, messages };
-            });
-            break;
-
-          case 'stage1_complete':
-            setCurrentConversation((prev) => {
-              const messages = [...prev.messages];
-              const lastMsg = messages[messages.length - 1];
-              lastMsg.stage1 = event.data;
-              lastMsg.loading.stage1 = false;
-              return { ...prev, messages };
-            });
-            break;
-
-          case 'stage2_start':
-            setCurrentConversation((prev) => {
-              const messages = [...prev.messages];
-              const lastMsg = messages[messages.length - 1];
-              lastMsg.loading.stage2 = true;
-              return { ...prev, messages };
-            });
-            break;
-
-          case 'stage2_complete':
-            setCurrentConversation((prev) => {
-              const messages = [...prev.messages];
-              const lastMsg = messages[messages.length - 1];
-              lastMsg.stage2 = event.data;
-              lastMsg.metadata = event.metadata;
-              lastMsg.loading.stage2 = false;
-              return { ...prev, messages };
-            });
-            break;
-
-          case 'stage3_start':
-            setCurrentConversation((prev) => {
-              const messages = [...prev.messages];
-              const lastMsg = messages[messages.length - 1];
-              lastMsg.loading.stage3 = true;
-              return { ...prev, messages };
-            });
-            break;
-
-          case 'stage3_complete':
-            setCurrentConversation((prev) => {
-              const messages = [...prev.messages];
-              const lastMsg = messages[messages.length - 1];
-              lastMsg.stage3 = event.data;
-              lastMsg.loading.stage3 = false;
-              return { ...prev, messages };
-            });
-            break;
-
-          case 'title_complete':
-            // Reload conversations to get updated title
-            loadConversations();
-            break;
-
-          case 'complete':
-            // Stream complete, reload conversations list
-            loadConversations();
-            setIsLoading(false);
-            break;
-
-          case 'error':
-            console.error('Stream error:', event.message);
-            setIsLoading(false);
-            break;
-
-          default:
-            console.log('Unknown event type:', eventType);
-        }
-      });
-    } catch (error) {
-      console.error('Failed to send message:', error);
-      // Remove optimistic messages on error
-      setCurrentConversation((prev) => ({
-        ...prev,
-        messages: prev.messages.slice(0, -2),
-      }));
-      setIsLoading(false);
+    try {
+      await api.sendMessageStream(target.id, content, handleEvent);
+    } catch (e) {
+      setError(e.message);
+      setConversation((prev) => (prev ? { ...prev, messages: prev.messages.slice(0, -2) } : prev));
+      setIsRunning(false);
     }
   };
 
   return (
     <div className="app">
       <Sidebar
+        view={view}
+        onNavigate={setView}
         conversations={conversations}
-        currentConversationId={currentConversationId}
-        onSelectConversation={handleSelectConversation}
-        onNewConversation={handleNewConversation}
+        currentId={currentId}
+        onSelect={openConversation}
+        onNew={newConversation}
+        onDelete={deleteConversation}
+        disabled={isRunning}
       />
-      <ChatInterface
-        conversation={currentConversation}
-        onSendMessage={handleSendMessage}
-        isLoading={isLoading}
-      />
+      <main className="main">
+        {error && (
+          <div className="toast" role="alert">
+            <span>{error}</span>
+            <button type="button" className="toast__close" onClick={() => setError(null)} aria-label="Fechar aviso">
+              ×
+            </button>
+          </div>
+        )}
+        {view === 'chat' && (
+          <ChatView
+            conversation={conversation}
+            config={config}
+            isRunning={isRunning}
+            onSend={sendMessage}
+            onNew={newConversation}
+            onOpenSettings={() => setView('settings')}
+          />
+        )}
+        {view === 'settings' && <SettingsView config={config} onSaved={setConfig} disabled={isRunning} />}
+        {view === 'dashboard' && <DashboardView onOpenConversation={openConversation} />}
+      </main>
     </div>
   );
 }

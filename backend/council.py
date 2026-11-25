@@ -1,61 +1,82 @@
 """3-stage LLM Council orchestration."""
 
-from typing import List, Dict, Any, Tuple
-from .openrouter import query_models_parallel, query_model
-from .config import COUNCIL_MODELS, CHAIRMAN_MODEL
+import asyncio
+import time
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+
+from .pricing import estimate_cost
+from .vertex import query_model
+
+# Optional async callback that receives progress events (dicts with a "type").
+Emit = Optional[Callable[[Dict[str, Any]], Awaitable[None]]]
 
 
-async def stage1_collect_responses(user_query: str) -> List[Dict[str, Any]]:
+async def _emit(emit: Emit, event: Dict[str, Any]):
+    if emit is not None:
+        await emit(event)
+
+
+async def _query_member(stage: str, model: str, messages: List[Dict[str, str]], emit: Emit) -> Dict[str, Any]:
+    """Query one council member, timing it and reporting start/finish events."""
+    await _emit(emit, {"type": "member_start", "stage": stage, "model": model})
+    started = time.perf_counter()
+    response = await query_model(model, messages)
+    latency_ms = int((time.perf_counter() - started) * 1000)
+    usage = (response or {}).get("usage")
+    info = {
+        "stage": stage,
+        "model": model,
+        "ok": response is not None,
+        "latency_ms": latency_ms,
+        "usage": usage,
+        "cost_usd": estimate_cost(model, usage),
+    }
+    # The member's own output goes with its "done" event, so the UI can show
+    # each answer/evaluation while slower members are still working.
+    event = {"type": "member_done", **info}
+    if response is not None:
+        content = response.get("content", "")
+        event["content"] = content
+        if stage == "stage2":
+            event["parsed_ranking"] = parse_ranking_from_text(content)
+    await _emit(emit, event)
+    return {"response": response, **info}
+
+
+async def stage1_collect_responses(
+    user_query: str, models: List[str], emit: Emit = None
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Stage 1: Collect individual responses from all council models.
 
-    Args:
-        user_query: The user's question
-
     Returns:
-        List of dicts with 'model' and 'response' keys
+        (results for the members that answered, per-member stats for all members)
     """
     messages = [{"role": "user", "content": user_query}]
+    runs = await asyncio.gather(*(_query_member("stage1", m, messages, emit) for m in models))
 
-    # Query all models in parallel
-    responses = await query_models_parallel(COUNCIL_MODELS, messages)
+    results = [
+        {
+            "model": run["model"],
+            "response": run["response"].get("content", ""),
+            "latency_ms": run["latency_ms"],
+            "usage": run["usage"],
+            "cost_usd": run["cost_usd"],
+        }
+        for run in runs
+        if run["ok"]
+    ]
+    stats = [{k: run[k] for k in ("stage", "model", "ok", "latency_ms", "usage", "cost_usd")} for run in runs]
+    return results, stats
 
-    # Format results
-    stage1_results = []
-    for model, response in responses.items():
-        if response is not None:  # Only include successful responses
-            stage1_results.append({
-                "model": model,
-                "response": response.get('content', '')
-            })
 
-    return stage1_results
-
-
-async def stage2_collect_rankings(
-    user_query: str,
-    stage1_results: List[Dict[str, Any]]
-) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
-    """
-    Stage 2: Each model ranks the anonymized responses.
-
-    Args:
-        user_query: The original user query
-        stage1_results: Results from Stage 1
-
-    Returns:
-        Tuple of (rankings list, label_to_model mapping)
-    """
-    # Create anonymized labels for responses (Response A, Response B, etc.)
+def build_ranking_prompt(user_query: str, stage1_results: List[Dict[str, Any]]) -> Tuple[str, Dict[str, str]]:
+    """Anonymize Stage 1 responses and build the Stage 2 ranking prompt."""
     labels = [chr(65 + i) for i in range(len(stage1_results))]  # A, B, C, ...
-
-    # Create mapping from label to model name
     label_to_model = {
         f"Response {label}": result['model']
         for label, result in zip(labels, stage1_results)
     }
-
-    # Build the ranking prompt
     responses_text = "\n\n".join([
         f"Response {label}:\n{result['response']}"
         for label, result in zip(labels, stage1_results)
@@ -91,44 +112,56 @@ FINAL RANKING:
 3. Response B
 
 Now provide your evaluation and ranking:"""
+    return ranking_prompt, label_to_model
 
+
+async def stage2_collect_rankings(
+    user_query: str,
+    stage1_results: List[Dict[str, Any]],
+    models: List[str],
+    emit: Emit = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, str], List[Dict[str, Any]]]:
+    """
+    Stage 2: Each council member ranks the anonymized responses.
+
+    Returns:
+        (rankings, label_to_model mapping, per-member stats)
+    """
+    ranking_prompt, label_to_model = build_ranking_prompt(user_query, stage1_results)
+    # Lets the UI de-anonymize evaluations as they arrive.
+    await _emit(emit, {"type": "stage2_labels", "label_to_model": label_to_model})
     messages = [{"role": "user", "content": ranking_prompt}]
+    runs = await asyncio.gather(*(_query_member("stage2", m, messages, emit) for m in models))
 
-    # Get rankings from all council models in parallel
-    responses = await query_models_parallel(COUNCIL_MODELS, messages)
-
-    # Format results
-    stage2_results = []
-    for model, response in responses.items():
-        if response is not None:
-            full_text = response.get('content', '')
-            parsed = parse_ranking_from_text(full_text)
-            stage2_results.append({
-                "model": model,
+    results = []
+    for run in runs:
+        if run["ok"]:
+            full_text = run["response"].get("content", "")
+            results.append({
+                "model": run["model"],
                 "ranking": full_text,
-                "parsed_ranking": parsed
+                "parsed_ranking": parse_ranking_from_text(full_text),
+                "latency_ms": run["latency_ms"],
+                "usage": run["usage"],
+                "cost_usd": run["cost_usd"],
             })
-
-    return stage2_results, label_to_model
+    stats = [{k: run[k] for k in ("stage", "model", "ok", "latency_ms", "usage", "cost_usd")} for run in runs]
+    return results, label_to_model, stats
 
 
 async def stage3_synthesize_final(
     user_query: str,
     stage1_results: List[Dict[str, Any]],
-    stage2_results: List[Dict[str, Any]]
-) -> Dict[str, Any]:
+    stage2_results: List[Dict[str, Any]],
+    chairman_model: str,
+    emit: Emit = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Stage 3: Chairman synthesizes final response.
 
-    Args:
-        user_query: The original user query
-        stage1_results: Individual model responses from Stage 1
-        stage2_results: Rankings from Stage 2
-
     Returns:
-        Dict with 'model' and 'response' keys
+        (result dict with 'model' and 'response', chairman stats)
     """
-    # Build comprehensive context for chairman
     stage1_text = "\n\n".join([
         f"Model: {result['model']}\nResponse: {result['response']}"
         for result in stage1_results
@@ -157,21 +190,23 @@ Your task as Chairman is to synthesize all of this information into a single, co
 Provide a clear, well-reasoned final answer that represents the council's collective wisdom:"""
 
     messages = [{"role": "user", "content": chairman_prompt}]
+    run = await _query_member("stage3", chairman_model, messages, emit)
+    stats = {k: run[k] for k in ("stage", "model", "ok", "latency_ms", "usage", "cost_usd")}
 
-    # Query the chairman model
-    response = await query_model(CHAIRMAN_MODEL, messages)
-
-    if response is None:
-        # Fallback if chairman fails
+    if not run["ok"]:
         return {
-            "model": CHAIRMAN_MODEL,
-            "response": "Error: Unable to generate final synthesis."
-        }
+            "model": chairman_model,
+            "response": "Error: Unable to generate final synthesis.",
+            "latency_ms": run["latency_ms"],
+        }, stats
 
     return {
-        "model": CHAIRMAN_MODEL,
-        "response": response.get('content', '')
-    }
+        "model": chairman_model,
+        "response": run["response"].get("content", ""),
+        "latency_ms": run["latency_ms"],
+        "usage": run["usage"],
+        "cost_usd": run["cost_usd"],
+    }, stats
 
 
 def parse_ranking_from_text(ranking_text: str) -> List[str]:
@@ -255,7 +290,7 @@ def calculate_aggregate_rankings(
     return aggregate
 
 
-async def generate_conversation_title(user_query: str) -> str:
+async def generate_conversation_title(user_query: str, title_model: str) -> str:
     """
     Generate a short title for a conversation based on the first user message.
 
@@ -274,8 +309,8 @@ Title:"""
 
     messages = [{"role": "user", "content": title_prompt}]
 
-    # Use gemini-2.5-flash for title generation (fast and cheap)
-    response = await query_model("google/gemini-2.5-flash", messages, timeout=30.0)
+    # Use a small, fast model for title generation
+    response = await query_model(title_model, messages, timeout=30.0)
 
     if response is None:
         # Fallback to a generic title
@@ -293,43 +328,74 @@ Title:"""
     return title
 
 
-async def run_full_council(user_query: str) -> Tuple[List, List, Dict, Dict]:
-    """
-    Run the complete 3-stage council process.
+def summarize_cost(members: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Estimated USD per stage and in total; `complete` is False when a call had no price."""
+    by_stage: Dict[str, float] = {"stage1": 0.0, "stage2": 0.0, "stage3": 0.0}
+    complete = True
+    for m in members:
+        if not m.get("ok"):
+            continue
+        if m.get("cost_usd") is None:
+            complete = False
+            continue
+        by_stage[m["stage"]] += m["cost_usd"]
+    return {"total_usd": sum(by_stage.values()), "by_stage_usd": by_stage, "complete": complete}
 
-    Args:
-        user_query: The user's question
+
+async def run_council(user_query: str, settings: Dict[str, Any], emit: Emit = None) -> Dict[str, Any]:
+    """
+    Run the complete 3-stage council process, reporting progress through `emit`.
 
     Returns:
-        Tuple of (stage1_results, stage2_results, stage3_result, metadata)
+        {"stage1", "stage2", "stage3", "metadata"}; metadata is persisted with the message.
     """
-    # Stage 1: Collect individual responses
-    stage1_results = await stage1_collect_responses(user_query)
+    members = settings["council_models"]
+    chairman = settings["chairman_model"]
+    started = time.perf_counter()
+    durations: Dict[str, int] = {}
 
-    # If no models responded successfully, return error
-    if not stage1_results:
-        return [], [], {
-            "model": "error",
-            "response": "All models failed to respond. Please try again."
-        }, {}
+    def lap(stage: str, since: float) -> float:
+        now = time.perf_counter()
+        durations[stage] = int((now - since) * 1000)
+        return now
 
-    # Stage 2: Collect rankings
-    stage2_results, label_to_model = await stage2_collect_rankings(user_query, stage1_results)
+    await _emit(emit, {"type": "stage1_start", "models": members})
+    t = time.perf_counter()
+    stage1, stage1_stats = await stage1_collect_responses(user_query, members, emit)
+    t = lap("stage1", t)
+    await _emit(emit, {"type": "stage1_complete", "data": stage1})
 
-    # Calculate aggregate rankings
-    aggregate_rankings = calculate_aggregate_rankings(stage2_results, label_to_model)
-
-    # Stage 3: Synthesize final answer
-    stage3_result = await stage3_synthesize_final(
-        user_query,
-        stage1_results,
-        stage2_results
-    )
-
-    # Prepare metadata
-    metadata = {
-        "label_to_model": label_to_model,
-        "aggregate_rankings": aggregate_rankings
+    metadata: Dict[str, Any] = {
+        "council": members,
+        "chairman": chairman,
+        "label_to_model": {},
+        "aggregate_rankings": [],
+        "members": stage1_stats,
     }
 
-    return stage1_results, stage2_results, stage3_result, metadata
+    if not stage1:
+        stage3 = {"model": "error", "response": "All models failed to respond. Please try again."}
+        metadata.update(durations_ms=durations, duration_ms=int((time.perf_counter() - started) * 1000))
+        return {"stage1": [], "stage2": [], "stage3": stage3, "metadata": metadata}
+
+    await _emit(emit, {"type": "stage2_start", "models": members})
+    stage2, label_to_model, stage2_stats = await stage2_collect_rankings(user_query, stage1, members, emit)
+    t = lap("stage2", t)
+    aggregate = calculate_aggregate_rankings(stage2, label_to_model)
+    metadata.update(label_to_model=label_to_model, aggregate_rankings=aggregate)
+    metadata["members"] += stage2_stats
+    await _emit(emit, {
+        "type": "stage2_complete",
+        "data": stage2,
+        "metadata": {"label_to_model": label_to_model, "aggregate_rankings": aggregate},
+    })
+
+    await _emit(emit, {"type": "stage3_start", "models": [chairman]})
+    stage3, stage3_stats = await stage3_synthesize_final(user_query, stage1, stage2, chairman, emit)
+    lap("stage3", t)
+    metadata["members"].append(stage3_stats)
+    metadata.update(durations_ms=durations, duration_ms=int((time.perf_counter() - started) * 1000))
+    metadata["cost"] = summarize_cost(metadata["members"])
+    await _emit(emit, {"type": "stage3_complete", "data": stage3})
+
+    return {"stage1": stage1, "stage2": stage2, "stage3": stage3, "metadata": metadata}

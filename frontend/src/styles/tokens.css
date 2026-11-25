@@ -1,0 +1,87 @@
+/* Tokens from a personal design system (tokens.json): colors, spacing,
+   radius, type scale. Fonts are open-license substitutes bundled from npm
+   (@fontsource): Outfit (OFL) for the primary face, Permanent Marker
+   (Apache 2.0) for hand-lettered accents. No brand files are shipped. */
+
+:root {
+  /* Palette */
+  --im-gelo: #f3ebe0;
+  --im-neon: #7cff01;
+  --im-black: #000000;
+  --im-grafite: #282829;
+  --im-cinza: #a6a6a6;
+  --im-white: #ffffff;
+  --im-neon-hover: #9bff3d;
+  --im-neon-press: #62cc01;
+  --im-grafite-2: #1a1a1b;
+  --im-grafite-3: #3a3a3c;
+  --im-gelo-2: #e6dccd;
+
+  /* Semantic */
+  --surface-page: var(--im-black);
+  --surface-sunken: var(--im-grafite-2);
+  --surface-card: var(--im-grafite);
+  --surface-raised: var(--im-grafite-3);
+  --surface-light: var(--im-gelo);
+  --surface-accent: var(--im-neon);
+  --text-primary: var(--im-white);
+  --text-on-light: var(--im-black);
+  --text-muted: var(--im-cinza);
+  --text-muted-on-light: #6b6b6b;
+  --text-accent: var(--im-neon);
+  --text-on-accent: var(--im-black);
+  --border-strong: var(--im-black);
+  --border-subtle: var(--im-grafite-3);
+  --border-control: var(--im-cinza);
+  --border-accent: var(--im-neon);
+  --focus-ring: var(--im-neon);
+  --danger: #ff4d4d;
+  --danger-on-light: #b91c1c;
+
+  /* Effects */
+  --shadow-hard: 4px 4px 0 #000000;
+  --shadow-hard-neon: 4px 4px 0 #7cff01;
+  --shadow-glow: 0 0 32px rgba(124, 255, 1, .35);
+
+  /* Spacing */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+
+  /* Radius */
+  --radius-sm: 8px;
+  --radius-md: 16px;
+  --radius-lg: 28px;
+  --radius-full: 999px;
+  --border-w: 2px;
+
+  /* Type */
+  --font-primary: 'Outfit', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-hand: 'Permanent Marker', 'Outfit', system-ui, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, monospace;
+  --fw-regular: 400;
+  --fw-medium: 500;
+  --fw-bold: 700;
+  --fw-black: 900;
+  --fs-h1: 44px;
+  --fs-h2: 30px;
+  --fs-h3: 22px;
+  --fs-body-lg: 18px;
+  --fs-body: 16px;
+  --fs-small: 14px;
+  --fs-caption: 12px;
+  --lh-heading: 1.05;
+  --lh-body: 1.5;
+  --ls-caps: 0.04em;
+
+  /* Motion */
+  --ease-snap: cubic-bezier(.2, .9, .3, 1.2);
+  --ease-out: cubic-bezier(.2, .7, .2, 1);
+  --dur-fast: 120ms;
+  --dur-base: 200ms;
+}

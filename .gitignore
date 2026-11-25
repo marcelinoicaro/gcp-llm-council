@@ -1,21 +1,72 @@
-# Python-generated files
+# Single .gitignore for the whole repo (backend, frontend, infra/terraform)
+
+# Python
 __pycache__/
 *.py[oc]
 build/
 dist/
 wheels/
 *.egg-info
-
-# Virtual environments
 .venv
 
-# Keys and secrets
+# Keys and secrets (keep only the example)
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*credentials*.json
+*service-account*.json
+application_default_credentials.json
 
-# Data files
+# Conversation data and UI settings (may contain private questions/answers)
 data/
 
 # Frontend
-frontend/node_modules/
+node_modules/
 frontend/dist/
+frontend/dist-ssr/
 frontend/.vite/
+*.local
+
+# Terraform (state and tfvars hold project IDs and e-mails; .terraform.lock.hcl IS versioned)
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*.sw?
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# Claude Code local settings and private notes (personal)
+.claude/settings.local.json
+CLAUDE.local.md
+
